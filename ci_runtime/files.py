@@ -138,7 +138,8 @@ class FileRunner:
                 completed.add(filename)
                 result = FileResult(**event)
                 print(
-                    f"CI_RUNTIME file={filename} success={result.success} seconds={result.seconds:.2f}",
+                    f"CI_RUNTIME file={filename} success={result.success} "
+                    f"seconds={result.seconds:.2f}",
                     flush=True,
                 )
                 results.append(record(filename, result))
@@ -388,7 +389,10 @@ class FileRunner:
 
     @staticmethod
     def coverage_key(service: RuntimeService) -> str:
-        return f"istanbul/{service.settings.suite}/{service.settings.run}/{service.identity}/coverage.json.gz"
+        return (
+            f"istanbul/{service.settings.suite}/{service.settings.run}/"
+            f"{service.identity}/coverage.json.gz"
+        )
 
     @staticmethod
     def validate_coverage(filename: Path) -> None:
@@ -419,11 +423,18 @@ const load = name => require(require.resolve(name, {paths: [path.dirname(from)]}
 let map = load('istanbul-lib-coverage').createCoverageMap({});
 const [output, reports, remap, ...inputs] = process.argv.slice(1);
 for (const input of inputs) map.merge(JSON.parse(fs.readFileSync(input, 'utf8')));
-if (remap === 'yes') map = await load('istanbul-lib-source-maps').createSourceMapStore().transformCoverage(map);
+if (remap === 'yes') {
+  map = await load('istanbul-lib-source-maps')
+    .createSourceMapStore().transformCoverage(map);
+}
 fs.writeFileSync(output, JSON.stringify(map.toJSON()));
 if (reports === 'yes') {
-  const context = load('istanbul-lib-report').createContext({dir: path.dirname(output), coverageMap: map});
-  for (const format of ['text-summary', 'cobertura']) load('istanbul-reports').create(format).execute(context);
+  const context = load('istanbul-lib-report').createContext({
+    dir: path.dirname(output), coverageMap: map
+  });
+  for (const format of ['text-summary', 'cobertura']) {
+    load('istanbul-reports').create(format).execute(context);
+  }
 }
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """
