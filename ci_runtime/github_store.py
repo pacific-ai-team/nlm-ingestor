@@ -39,7 +39,7 @@ class GitHubStore:
             raise OSError("CI artifact operation failed")
         for line in reversed(result.stdout.splitlines()):
             if line.startswith("CI_RUNTIME_JSON="):
-                return line.removeprefix("CI_RUNTIME_JSON=")
+                return line[len("CI_RUNTIME_JSON=") :]
         raise OSError("CI artifact helper returned no result")
 
     def objects(self, prefix: str) -> list[StoredObject]:

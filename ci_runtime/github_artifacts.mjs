@@ -12,6 +12,7 @@ const token = process.env.CI_RUNTIME_GITHUB_TOKEN;
 const hash = value => createHash('sha256').update(value).digest('hex').slice(0, 32);
 const namespace = value => value.startsWith('history/') ? value.split('/').slice(0, -2).join('/') : value;
 const prefix = value => `ci-runtime-${value.startsWith('history/') ? 'h' : 'c'}-${hash(namespace(value))}-`;
+const checkpointTime = artifact => Number(artifact.name.match(/-(\d+)-[0-9a-f]{8}$/)?.[1] || 0);
 const [repositoryOwner, repositoryName] = repository.split('/');
 const sdk = await import(pathToFileURL(process.env.CI_RUNTIME_ARTIFACT_SDK).href);
 const client = new sdk.DefaultArtifactClient();
@@ -74,7 +75,10 @@ try {
         found.push(...response.artifacts.filter(a => !a.expired && a.name.startsWith(expected)));
         if (response.artifacts.length < 100) break;
       }
-      found.sort((a, b) => b.id - a.id);
+      // GitHub artifact IDs are not chronological. Prefer server creation time,
+      // then our upload timestamp for archives finalized in the same second.
+      found.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) ||
+        checkpointTime(b) - checkpointTime(a) || b.id - a.id);
       result = found.length ? await download(found[0].id, process.env.GITHUB_RUN_ID) : false;
     }
   } else {

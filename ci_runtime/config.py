@@ -28,10 +28,16 @@ class RuntimeSettings:
     state: Path = Path(".ci-runtime")
     context: str = ""
     credential_source: str = "irsa"
+    history_aliases: Path | None = None
     history_file: Path | None = None
     split_files: tuple[str, ...] = ()
+    single_worker: bool = False
 
     def __post_init__(self) -> None:
+        if self.single_worker and (self.shards != 1 or self.history_file is not None):
+            raise ValueError(
+                "single-worker recovery requires one shard and no history file"
+            )
         if self.shards < 1 or not 0 <= self.shard < self.shards:
             raise ValueError("CI_RUNTIME_SHARD must be in [0, CI_RUNTIME_SHARDS)")
         if not all((self.store, self.suite, self.revision, self.run)):
@@ -52,8 +58,12 @@ class RuntimeSettings:
     @classmethod
     def from_environment(cls) -> RuntimeSettings:
         cutoff = os.environ["CI_RUNTIME_EPOCH"]
+        single_worker = os.environ.get("CI_RUNTIME_SINGLE_WORKER", "0")
+        if single_worker not in ("0", "1"):
+            raise ValueError("CI_RUNTIME_SINGLE_WORKER must be 0 or 1")
         return cls(
             store=os.environ["CI_RUNTIME_STORE"],
+            single_worker=single_worker == "1",
             suite=os.environ["CI_RUNTIME_SUITE"],
             revision=os.environ["CI_RUNTIME_REVISION"],
             run=os.environ["CI_RUNTIME_RUN"],
@@ -69,6 +79,11 @@ class RuntimeSettings:
             credential_source=os.environ.get("CI_RUNTIME_CREDENTIAL_SOURCE", "irsa"),
             split_files=tuple(
                 sorted(os.environ.get("CI_RUNTIME_SPLIT_FILES", "").split())
+            ),
+            history_aliases=(
+                Path(os.environ["CI_RUNTIME_HISTORY_ALIASES"])
+                if os.environ.get("CI_RUNTIME_HISTORY_ALIASES")
+                else None
             ),
             history_file=(
                 Path(os.environ["CI_RUNTIME_HISTORY_FILE"])

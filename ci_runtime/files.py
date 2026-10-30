@@ -85,9 +85,14 @@ class FileRunner:
         return files
 
     def execute_jest_batch(self, files: list[str], jobs: int, record) -> list[bool]:
+        aggregate = self.state / "jest-aggregate" / "coverage-final.json"
+        aggregate.unlink(missing_ok=True)
         if not files:
             return []
         config = self.jest_config()
+        order = self.state / "jest-order.json"
+        order.write_text(json.dumps(files))
+        config["testSequencer"] = str(Path(__file__).with_name("jest_sequencer.mjs"))
         config["reporters"] = [
             [
                 str(Path(__file__).with_name("jest_reporter.mjs")),
@@ -95,7 +100,13 @@ class FileRunner:
             ]
         ]
         if self.coverage:
-            config.update(collectCoverage=True, coverageReporters=[])
+            # Keep the product allowlist: an empty collectCoverageFrom also
+            # instruments generated SDKs that the repository excludes.
+            config.update(
+                collectCoverage=True,
+                coverageReporters=["json"],
+                coverageDirectory=str(aggregate.parent),
+            )
         args = [
             self.node,
             "node_modules/jest/bin/jest.js",
@@ -112,7 +123,7 @@ class FileRunner:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            env=self.environment,
+            env={**self.environment, "CI_RUNTIME_JEST_ORDER": str(order)},
         ) as process:
             assert process.stdout is not None
             for line in process.stdout:
@@ -134,6 +145,10 @@ class FileRunner:
             code = process.wait()
         if completed != set(files) or code != 0:
             results.append(False)
+        elif self.coverage:
+            # This is Jest's ordinary complete product map, with its original
+            # allowlist and untested-file inventory. Reuse it in the final gate.
+            self.validate_coverage(aggregate)
         return results
 
     def execute(self, filename: str) -> FileResult:
@@ -263,6 +278,8 @@ class FileRunner:
         prior_coverage.unlink(missing_ok=True)
         coverage_inputs: list[Path] = []
         coverage_lock = Lock()
+        flush_lock = Lock()
+        pending_coverage: dict[str, FileResult] = {}
         if self.coverage and service.restored:
             archive = self.state / "prior-istanbul.json.gz"
             if service.store.download(self.coverage_key(service), archive):
@@ -274,36 +291,66 @@ class FileRunner:
         selected, restored = service.select(self.collect(patterns))
         if self.coverage and not restored:
             coverage_inputs.clear()
-        service.start_uploader()
+
+        def record(filename: str, result: FileResult) -> None:
+            service.record(filename, "setup", result.recoverable, 0)
+            service.record(filename, "call", result.recoverable, result.seconds)
+            service.record(filename, "teardown", result.recoverable, 0)
+
+        def flush_coverage() -> None:
+            # Serialize cumulative maps/publication without holding the short
+            # pending-results lock across a merge or network transfer. Jest's
+            # stdout consumer must keep accepting completed-file events.
+            with flush_lock:
+                with coverage_lock:
+                    batch = dict(pending_coverage)
+                    pending_coverage.clear()
+                if not batch:
+                    return
+                try:
+                    data = [self.coverage_file(name) for name in batch]
+                    changed = any(json.loads(path.read_text()) for path in data)
+                    needs_upload = changed or not coverage_inputs
+                    staged = self.state / "coverage-next.json"
+                    if needs_upload:
+                        self.merge_coverage([*coverage_inputs, *data], staged)
+                        archive = self.state / "istanbul.json.gz"
+                        archive.write_bytes(
+                            gzip.compress(staged.read_bytes(), compresslevel=1)
+                        )
+                        # Coverage must reach durable storage before any of
+                        # this detached batch's passes enter the journal.
+                        service.store.upload(archive, self.coverage_key(service))
+                    for filename, result in batch.items():
+                        record(filename, result)
+                    if needs_upload:
+                        merged = self.state / "coverage-final.json"
+                        staged.replace(merged)
+                        coverage_inputs[:] = [merged]
+                except BaseException:
+                    # A transient failure must retain both the detached batch
+                    # and any files completed while its upload was in flight.
+                    with coverage_lock:
+                        pending_coverage.update(batch)
+                    raise
+                print(
+                    f"CI_RUNTIME coverage_batch files={len(batch)} uploaded={needs_upload}",
+                    flush=True,
+                )
 
         def execute(filename: str, result: FileResult | None = None) -> bool:
             result = result or self.execute(filename)
-
-            def record() -> None:
-                service.record(filename, "setup", result.recoverable, 0)
-                service.record(filename, "call", result.recoverable, result.seconds)
-                service.record(filename, "teardown", result.recoverable, 0)
-
             if self.coverage and result.success:
+                self.validate_coverage(self.coverage_file(filename))
                 with coverage_lock:
-                    data = self.coverage_file(filename)
-                    self.validate_coverage(data)
-                    if json.loads(data.read_text()) or not coverage_inputs:
-                        merged = self.state / "coverage-final.json"
-                        self.merge_coverage([*coverage_inputs, data], merged)
-                        coverage_inputs[:] = [merged]
-                        archive = self.state / "istanbul.json.gz"
-                        archive.write_bytes(
-                            gzip.compress(merged.read_bytes(), compresslevel=1)
-                        )
-                        # A coverage snapshot reaches storage before any completed
-                        # file can enter an uploaded journal checkpoint. A file
-                        # importing no product code reuses the existing snapshot.
-                        service.store.upload(archive, self.coverage_key(service))
-                    record()
+                    pending_coverage[filename] = result
             else:
-                record()
+                record(filename, result)
             return result.success
+
+        if self.coverage:
+            service.before_publish = flush_coverage
+        service.start_uploader()
 
         try:
             ordered = sorted(selected, key=lambda n: (-service.history.get(n, 0), n))
@@ -312,6 +359,8 @@ class FileRunner:
             else:
                 with ThreadPoolExecutor(max_workers=jobs) as pool:
                     results = list(pool.map(execute, ordered))
+            if self.coverage:
+                flush_coverage()
             if self.coverage and all(results):
                 self.merge_coverage(
                     coverage_inputs,
@@ -434,6 +483,7 @@ def main(args: list[str]) -> int:
             description="Merge shard coverage with the complete product inventory"
         )
         parser.add_argument("--input", action="append", required=True)
+        parser.add_argument("--inventory-json", type=Path)
         parser.add_argument(
             "--output", type=Path, default=Path("coverage/coverage-final.json")
         )
@@ -445,9 +495,27 @@ def main(args: list[str]) -> int:
             runner.validate_coverage(filename)
         remapped = runner.state / "remapped-shards.json"
         runner.merge_coverage(inputs, remapped, remap=True)
-        runner.merge_coverage(
-            [runner.coverage_inventory(), remapped], options.output.resolve(), True
-        )
+        inventory = options.inventory_json
+        if inventory is None or not inventory.is_file():
+            # A retry can restore every test before any pool runs. It still
+            # needs a full product inventory on this new machine.
+            inventory = runner.coverage_inventory()
+        else:
+            runner.validate_coverage(inventory)
+            data = json.loads(inventory.read_text())
+            if not data:
+                raise ValueError("whole-product coverage inventory is empty")
+            # Keep this map's complete denominator without counting current
+            # test hits twice; the durable file maps own all hit counts.
+            for coverage in data.values():
+                for kind in ("s", "f"):
+                    coverage[kind] = {key: 0 for key in coverage[kind]}
+                coverage["b"] = {
+                    key: [0] * len(hits) for key, hits in coverage["b"].items()
+                }
+            inventory = runner.state / "complete-inventory.json"
+            inventory.write_text(json.dumps(data))
+        runner.merge_coverage([inventory, remapped], options.output.resolve(), True)
         return 0
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runner", choices=["node", "vitest", "jest"], required=True)
