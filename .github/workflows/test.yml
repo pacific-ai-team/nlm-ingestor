@@ -68,6 +68,7 @@ jobs:
         with:
           name: test-history-plan-${{ github.run_id }}
           path: .ci-runtime/plan/history-plan.json
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
 
