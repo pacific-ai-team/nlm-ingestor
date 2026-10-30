@@ -59,6 +59,8 @@ extend-exclude = '''
 
 [tool.isort]
 profile = "black"
+# Generated runtime stays byte-identical to the centrally linted owner.
+extend_skip = ["ci_runtime"]
 line_length = 88
 multi_line_output = 3
 include_trailing_comma = true

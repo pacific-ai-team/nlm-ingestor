@@ -1,0 +1,24 @@
+name: Durable CI artifacts
+description: Prepare Node and the official artifact SDK for periodic test checkpoints
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      with:
+        node-version: 24.x
+    - name: Install artifact client outside the repository dependencies
+      shell: bash
+      run: npm ci --prefix "${GITHUB_ACTION_PATH}/tools" --ignore-scripts --no-audit --no-fund
+    - name: Expose the job-scoped artifact service to the checkpoint uploader
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+      with:
+        script: |
+          const path = require('node:path');
+          for (const key of ['ACTIONS_RUNTIME_TOKEN', 'ACTIONS_RESULTS_URL']) {
+            const value = process.env[key];
+            if (!value) throw new Error(`Missing Actions artifact setting: ${key}`);
+            core.setSecret(value);
+            core.exportVariable(key, value);
+          }
+          core.exportVariable('CI_RUNTIME_ARTIFACT_SDK', path.join(process.env.GITHUB_WORKSPACE,
+            '.github', 'actions', 'ci-runtime', 'tools', 'node_modules', '@actions', 'artifact', 'lib', 'artifact.js'));

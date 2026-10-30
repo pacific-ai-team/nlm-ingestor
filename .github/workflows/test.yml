@@ -4,11 +4,96 @@ on:
     paths:
       - "**"
 
+permissions:
+  contents: read
+
+env:
+  CI_RUNTIME_SHARDS: "2"
+
 jobs:
-  build:
+  test-plan:
+    name: Test history plan
+    runs-on: ${{ vars.CI_RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      epoch: ${{ steps.existing.outputs.epoch }}
+    env:
+      CI_RUNTIME_STORE: github://${{ github.repository }}
+      CI_RUNTIME_SUITE: nlm-ingestor/regular
+      CI_RUNTIME_REVISION: ${{ github.sha }}
+      CI_RUNTIME_RUN: ${{ github.run_id }}
+      CI_RUNTIME_GITHUB_TOKEN: ${{ github.token }}
+      CI_RUNTIME_STATE: .ci-runtime/plan
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.10"
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+      - uses: ./.github/actions/ci-runtime # zizmor: ignore[self-repository] -- actionlint 1.7.12 does not support $/ syntax
+      # A fixed run-id artifact freezes timing history across every rerun attempt.
+      - name: Find this workflow's immutable plan
+        id: existing
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        with:
+          script: |
+            const run_id = Number(process.env.GITHUB_RUN_ID);
+            const run = await github.rest.actions.getWorkflowRun({...context.repo, run_id});
+            core.setOutput('epoch', run.data.created_at);
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts,
+              {...context.repo, run_id, per_page: 100});
+            const found = artifacts.filter(a => a.name === `test-history-plan-${run_id}` && !a.expired);
+            if (found.length > 1) throw new Error('Ambiguous history plan');
+            if (!found.length && Number(process.env.GITHUB_RUN_ATTEMPT) > 1)
+              throw new Error('Original history plan is missing; start a new workflow run');
+            core.setOutput('artifact', found[0]?.id || '');
+      - if: steps.existing.outputs.artifact != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ steps.existing.outputs.artifact }}
+          merge-multiple: true
+          path: .ci-runtime/plan
+      - if: steps.existing.outputs.artifact == ''
+        name: Freeze measured history once
+        env:
+          CI_RUNTIME_EPOCH: ${{ steps.existing.outputs.epoch }}
+        run: uv run --isolated --no-project --with coverage python -m ci_runtime history-plan
+      - if: steps.existing.outputs.artifact == ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: test-history-plan-${{ github.run_id }}
+          path: .ci-runtime/plan/history-plan.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  test-shards:
+    needs: test-plan
+    permissions:
+      contents: read
+      actions: read
+    env:
+      CI_RUNTIME_STORE: github://${{ github.repository }}
+      CI_RUNTIME_SUITE: nlm-ingestor/regular
+      CI_RUNTIME_REVISION: ${{ github.sha }}
+      CI_RUNTIME_RUN: ${{ github.run_id }}
+      CI_RUNTIME_GITHUB_TOKEN: ${{ github.token }}
+      CI_RUNTIME_EPOCH: ${{ needs.test-plan.outputs.epoch }}
+      CI_RUNTIME_SHARD: ${{ matrix.shard }}
+      CI_RUNTIME_STATE: .ci-runtime/tests
+      CI_RUNTIME_HISTORY_FILE: .ci-runtime/plan/history-plan.json
+      CI_RUNTIME_CONTEXT: tika-server-standard-nlm-modified-2.9.2_v2
+
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
+        shard: [0, 1]
         python-version: ["3.10"]
 
     steps:
@@ -21,12 +106,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '18'
 
       - name: Set up Java
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
         with:
           distribution: 'temurin'
           java-version: '11'
@@ -56,10 +141,18 @@ jobs:
 
       - name: Install Poetry and dependencies
         run: |
+          POETRY_TOOL_ENV="${RUNNER_TEMP}/poetry-tool"
+          python -m venv "${POETRY_TOOL_ENV}"
+          "${POETRY_TOOL_ENV}/bin/python" -m pip install poetry
+          python -m venv "${GITHUB_WORKSPACE}/.venv"
+          export VIRTUAL_ENV="${GITHUB_WORKSPACE}/.venv"
+          export PATH="${VIRTUAL_ENV}/bin:${POETRY_TOOL_ENV}/bin:${PATH}"
           python -m pip install --upgrade pip setuptools wheel
-          pip install poetry
-          poetry config virtualenvs.create false
+          test "$(poetry env info --path)" = "${VIRTUAL_ENV}"
           poetry install --with dev --no-interaction
+          test "$(poetry env info --path)" = "${VIRTUAL_ENV}"
+          printf '%s\n' "${POETRY_TOOL_ENV}/bin" "${VIRTUAL_ENV}/bin" >> "${GITHUB_PATH}"
+          printf 'VIRTUAL_ENV=%s\n' "${VIRTUAL_ENV}" >> "${GITHUB_ENV}"
 
       - name: Verify pdfplumber installation
         run: |
@@ -69,12 +162,21 @@ jobs:
         run: |
           python -c "import nltk; nltk.download('punkt'); nltk.download('stopwords'); nltk.download('punkt_tab')"
 
+      - uses: ./.github/actions/ci-runtime # zizmor: ignore[self-repository] -- local vendored artifact bridge
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: test-history-plan-${{ github.run_id }}
+          path: .ci-runtime/plan
+      - name: Install checkpoint support
+        run: python -m pip install coverage
+
       - name: Run regular tests
         run: |
           pkill -f "tika" > /dev/null 2>&1 || true
-          pytest tests/
+          pytest tests/ -p ci_runtime.pytest_plugin
 
       - name: Run PDF ingestor tests with Tika
+        if: matrix.shard == 0
         run: |
           # Clean up any existing Tika processes
           pkill -f "tika-server" > /dev/null 2>&1 || true
@@ -111,3 +213,16 @@ jobs:
           
           # Cleanup
           pkill -f "tika-server" || true
+
+  build:
+    name: build (3.10)
+    needs: [test-plan, test-shards]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Require every regular shard and the unchanged Tika page suite
+        env:
+          PLAN_RESULT: ${{ needs.test-plan.result }}
+          TEST_RESULT: ${{ needs.test-shards.result }}
+        run: test "$PLAN_RESULT" = success && test "$TEST_RESULT" = success
