@@ -141,10 +141,18 @@ jobs:
 
       - name: Install Poetry and dependencies
         run: |
+          POETRY_TOOL_ENV="${RUNNER_TEMP}/poetry-tool"
+          python -m venv "${POETRY_TOOL_ENV}"
+          "${POETRY_TOOL_ENV}/bin/python" -m pip install poetry
+          python -m venv "${GITHUB_WORKSPACE}/.venv"
+          export VIRTUAL_ENV="${GITHUB_WORKSPACE}/.venv"
+          export PATH="${VIRTUAL_ENV}/bin:${POETRY_TOOL_ENV}/bin:${PATH}"
           python -m pip install --upgrade pip setuptools wheel
-          pip install poetry
-          poetry config virtualenvs.create false
+          test "$(poetry env info --path)" = "${VIRTUAL_ENV}"
           poetry install --with dev --no-interaction
+          test "$(poetry env info --path)" = "${VIRTUAL_ENV}"
+          printf '%s\n' "${POETRY_TOOL_ENV}/bin" "${VIRTUAL_ENV}/bin" >> "${GITHUB_PATH}"
+          printf 'VIRTUAL_ENV=%s\n' "${VIRTUAL_ENV}" >> "${GITHUB_ENV}"
 
       - name: Verify pdfplumber installation
         run: |
