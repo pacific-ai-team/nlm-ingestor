@@ -1,4 +1,4 @@
-"""File-level Node and Vitest execution using the shared durable journal."""
+"""Node, Vitest and pooled Jest execution using the durable file journal."""
 
 from __future__ import annotations
 
@@ -11,10 +11,10 @@ import re
 import shutil
 import subprocess
 import time
-from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 
 from ci_runtime.config import RuntimeSettings
 from ci_runtime.service import RuntimeService
@@ -95,9 +95,7 @@ class FileRunner:
             ]
         ]
         if self.coverage:
-            config.update(
-                collectCoverage=True, collectCoverageFrom=[], coverageReporters=[]
-            )
+            config.update(collectCoverage=True, coverageReporters=[])
         args = [
             self.node,
             "node_modules/jest/bin/jest.js",
@@ -196,10 +194,12 @@ class FileRunner:
             counts = {
                 k: int(v)
                 for k, v in re.findall(
-                    r"^# (tests|fail|cancelled|skipped|todo) (\d+)\s*$", text, re.M
+                    r"^# (tests|fail|cancelled|skipped|todo) (\d+)\s*$",
+                    text,
+                    re.MULTILINE,
                 )
             }
-            names = re.findall(r"^\s*# Subtest: (.+)$", text, re.M)
+            names = re.findall(r"^\s*# Subtest: (.+)$", text, re.MULTILINE)
             # Node counts an empty file's process wrapper as one passing test.
             explicit = any(
                 Path(name).resolve() != Path(filename).resolve() for name in names
@@ -264,6 +264,8 @@ class FileRunner:
             else:
                 service.restored.clear()
         selected, restored = service.select(self.collect(patterns))
+        if self.coverage and not restored:
+            coverage_inputs.clear()
         service.start_uploader()
 
         def execute(filename: str, result: FileResult | None = None) -> bool:
@@ -278,14 +280,18 @@ class FileRunner:
                 with coverage_lock:
                     data = self.coverage_file(filename)
                     self.validate_coverage(data)
-                    coverage_inputs.append(data)
-                    merged = self.state / "coverage-final.json"
-                    self.merge_coverage(coverage_inputs, merged)
-                    archive = self.state / "istanbul.json.gz"
-                    archive.write_bytes(gzip.compress(merged.read_bytes()))
-                    # The coverage snapshot always reaches storage before a
-                    # completed file can enter any uploaded journal checkpoint.
-                    service.store.upload(archive, self.coverage_key(service))
+                    if json.loads(data.read_text()) or not coverage_inputs:
+                        merged = self.state / "coverage-final.json"
+                        self.merge_coverage([*coverage_inputs, data], merged)
+                        coverage_inputs[:] = [merged]
+                        archive = self.state / "istanbul.json.gz"
+                        archive.write_bytes(
+                            gzip.compress(merged.read_bytes(), compresslevel=1)
+                        )
+                        # A coverage snapshot reaches storage before any completed
+                        # file can enter an uploaded journal checkpoint. A file
+                        # importing no product code reuses the existing snapshot.
+                        service.store.upload(archive, self.coverage_key(service))
                     record()
             else:
                 record()
@@ -339,23 +345,30 @@ class FileRunner:
             raise ValueError("invalid Istanbul coverage")
 
     def merge_coverage(
-        self, files: list[Path], output: Path, reports: bool = False
+        self,
+        files: list[Path],
+        output: Path,
+        reports: bool = False,
+        remap: bool = False,
     ) -> None:
         output.parent.mkdir(parents=True, exist_ok=True)
         # Resolve through Jest: these are its own declared Istanbul dependencies.
         script = """
+void (async () => {
 const fs = require('node:fs');
 const path = require('node:path');
 const from = require.resolve('@jest/reporters');
 const load = name => require(require.resolve(name, {paths: [path.dirname(from)]}));
-const map = load('istanbul-lib-coverage').createCoverageMap({});
-const [output, reports, ...inputs] = process.argv.slice(1);
+let map = load('istanbul-lib-coverage').createCoverageMap({});
+const [output, reports, remap, ...inputs] = process.argv.slice(1);
 for (const input of inputs) map.merge(JSON.parse(fs.readFileSync(input, 'utf8')));
+if (remap === 'yes') map = await load('istanbul-lib-source-maps').createSourceMapStore().transformCoverage(map);
 fs.writeFileSync(output, JSON.stringify(map.toJSON()));
 if (reports === 'yes') {
   const context = load('istanbul-lib-report').createContext({dir: path.dirname(output), coverageMap: map});
   for (const format of ['text-summary', 'cobertura']) load('istanbul-reports').create(format).execute(context);
 }
+})().catch(error => { console.error(error); process.exitCode = 1; });
 """
         subprocess.run(
             [
@@ -364,6 +377,7 @@ if (reports === 'yes') {
                 script,
                 str(output),
                 "yes" if reports else "no",
+                "yes" if remap else "no",
                 *map(str, files),
             ],
             check=True,
@@ -421,8 +435,10 @@ def main(args: list[str]) -> int:
         inputs = [Path(name).resolve() for name in options.input]
         for filename in inputs:
             runner.validate_coverage(filename)
+        remapped = runner.state / "remapped-shards.json"
+        runner.merge_coverage(inputs, remapped, remap=True)
         runner.merge_coverage(
-            [runner.coverage_inventory(), *inputs], options.output.resolve(), True
+            [runner.coverage_inventory(), remapped], options.output.resolve(), True
         )
         return 0
     parser = argparse.ArgumentParser(description=__doc__)

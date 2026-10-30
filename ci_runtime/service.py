@@ -2,8 +2,9 @@
 
 Shard membership uses only history older than the common workflow creation
 instant. A checkpoint is one atomic object: its journal can never outrun its
-coverage. Files are the recovery unit, so module-scoped state is replayed
-unless every selected test in that file completed successfully.
+coverage. Files are the default recovery unit: module-scoped state is replayed unless
+every selected test in that file passed. Explicitly independent files can opt
+into item-level packing and recovery through split_files.
 """
 
 from __future__ import annotations
@@ -100,7 +101,16 @@ class RuntimeService:
         }
         loads = [0.0] * shards
         assignments: list[list[str]] = [[] for _ in range(shards)]
-        for name in sorted(groups, key=lambda n: (-weights[n], n)):
+        # Bootstrap explicit independent batches before ordinary file groups:
+        # unknown tiny defaults must not all fill one large file's load gap.
+        # Once measured, every group participates in ordinary global LPT.
+        bootstrap = {
+            name
+            for name, ids in groups.items()
+            if name.split("::", 1)[0] in split_files
+            and any(nodeid not in seconds for nodeid in ids)
+        }
+        for name in sorted(groups, key=lambda n: (n not in bootstrap, -weights[n], n)):
             shard = min(range(shards), key=lambda i: (loads[i], i))
             assignments[shard].extend(groups[name])
             loads[shard] += weights[name]
