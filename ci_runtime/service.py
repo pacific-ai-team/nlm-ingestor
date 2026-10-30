@@ -59,6 +59,8 @@ class RuntimeService:
                 settings.shards,
                 settings.shard,
                 sorted(settings.split_files),
+                # Older journals could overwrite a failed subtest with a pass.
+                "fail-sticky-lifecycle-v1",
             ]
         )
         if settings.single_worker:
@@ -291,10 +293,15 @@ class RuntimeService:
         return selected, resumed
 
     def record(self, nodeid: str, stage: str, passed: bool, seconds: float) -> None:
+        # Subtests and reruns can emit several reports for the same stage.
+        # A later pass cannot erase a failure; parent timings include subcalls.
         connection = sqlite3.connect(self.db, timeout=SQLITE_TIMEOUT_SECONDS)
         with closing(connection) as db, db:
             db.execute(
-                "INSERT OR REPLACE INTO reports VALUES (?, ?, ?, ?)",
+                "INSERT INTO reports VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(nodeid, stage) DO UPDATE SET "
+                "passed = MIN(reports.passed, excluded.passed), "
+                "seconds = MAX(reports.seconds, excluded.seconds)",
                 (nodeid, stage, int(passed), seconds),
             )
 
