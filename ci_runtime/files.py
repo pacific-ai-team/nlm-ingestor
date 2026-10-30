@@ -177,6 +177,14 @@ class FileRunner:
                 "--outputFile=" + str(report),
                 "--maxWorkers=1",
             ]
+            metadata = Path("node_modules/vitest/package.json")
+            if (
+                metadata.is_file()
+                and int(json.loads(metadata.read_text())["version"].split(".")[0]) < 4
+            ):
+                # Vitest2/3 otherwise inherit a CPU-based minimum larger than
+                # this one-worker pool. Vitest4 removed the minimum option.
+                args.append("--minWorkers=1")
         started = time.monotonic()
         with output.open("wb") as stream:
             result = subprocess.run(
