@@ -204,9 +204,8 @@ class RuntimeService:
     def initialise(self) -> None:
         # This directory is attempt-local (emptyDir/RUNNER_TEMP), never a
         # dependency cache. Only a validated remote manifest can skip a test.
-        with closing(
-            sqlite3.connect(self.db, timeout=SQLITE_TIMEOUT_SECONDS)
-        ) as db, db:
+        connection = sqlite3.connect(self.db, timeout=SQLITE_TIMEOUT_SECONDS)
+        with closing(connection) as db, db:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS reports "
                 "(nodeid TEXT, stage TEXT, passed INTEGER, seconds REAL, "
@@ -292,18 +291,16 @@ class RuntimeService:
         return selected, resumed
 
     def record(self, nodeid: str, stage: str, passed: bool, seconds: float) -> None:
-        with closing(
-            sqlite3.connect(self.db, timeout=SQLITE_TIMEOUT_SECONDS)
-        ) as db, db:
+        connection = sqlite3.connect(self.db, timeout=SQLITE_TIMEOUT_SECONDS)
+        with closing(connection) as db, db:
             db.execute(
                 "INSERT OR REPLACE INTO reports VALUES (?, ?, ?, ?)",
                 (nodeid, stage, int(passed), seconds),
             )
 
     def snapshot(self) -> RuntimeManifest:
-        with closing(
-            sqlite3.connect(self.db, timeout=SQLITE_TIMEOUT_SECONDS)
-        ) as db, db:
+        connection = sqlite3.connect(self.db, timeout=SQLITE_TIMEOUT_SECONDS)
+        with closing(connection) as db, db:
             rows = db.execute(
                 "SELECT nodeid, stage, passed, seconds FROM reports"
             ).fetchall()
