@@ -75,6 +75,7 @@ jobs:
           pytest tests/
 
       - name: Run PDF ingestor tests with Tika
+        shell: bash
         run: |
           # Clean up any existing Tika processes
           pkill -f "tika-server" > /dev/null 2>&1 || true
