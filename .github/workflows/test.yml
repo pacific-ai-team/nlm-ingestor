@@ -87,7 +87,7 @@ jobs:
       CI_RUNTIME_SHARD: ${{ matrix.shard }}
       CI_RUNTIME_STATE: .ci-runtime/tests
       CI_RUNTIME_HISTORY_FILE: .ci-runtime/plan/history-plan.json
-      CI_RUNTIME_CONTEXT: tika-server-standard-nlm-modified-2.9.2_v2
+      NLTK_DATA: ${{ github.workspace }}/.ci-runtime/nltk
 
     runs-on: ubuntu-latest
     strategy:
@@ -127,13 +127,6 @@ jobs:
             ${{ runner.os }}-pip-
             ${{ runner.os }}-
 
-      # Cache Tika Server
-      - name: Cache Tika Server
-        uses: actions/cache@v4
-        with:
-          path: jars
-          key: ${{ runner.os }}-tika-server-2.9.2
-
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -160,7 +153,13 @@ jobs:
 
       - name: Download NLTK data
         run: |
-          python -c "import nltk; nltk.download('punkt'); nltk.download('stopwords'); nltk.download('punkt_tab')"
+          python - <<'PYTHON'
+          import os
+          import nltk
+
+          for package in ("punkt", "stopwords", "punkt_tab"):
+              nltk.download(package, download_dir=os.environ["NLTK_DATA"], raise_on_error=True)
+          PYTHON
 
       - uses: ./.github/actions/ci-runtime # zizmor: ignore[self-repository] -- local vendored artifact bridge
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
@@ -171,7 +170,10 @@ jobs:
         run: python -m pip install coverage
 
       - name: Run regular tests
+        env:
+          CI_RUNTIME_CONTEXT: ${{ hashFiles('.ci-runtime/nltk/**/*') }}
         run: |
+          test -n "$CI_RUNTIME_CONTEXT"
           pkill -f "tika" > /dev/null 2>&1 || true
           pytest tests/ -p ci_runtime.pytest_plugin
 
@@ -200,7 +202,7 @@ jobs:
             sleep 1
           done
           
-          # Run tests with better error handling
+          set -o pipefail
           if ! PYTHONPATH=. poetry run python tests/run_ingestor_page_test.py 2>&1 | tee test-output.log; then
             echo "Tests failed. Displaying logs:"
             echo "=== Tika Startup Logs ==="
