@@ -143,6 +143,7 @@ def run_test(doc_id=""):
 
     results = []
     for pdf_id in pdfs:
+        debug_file = debug_dir / f"{pdf_id}_comparison.txt"
         try:
             print(f"Processing document: {pdf_id}")
             pdf_path = f"files/pdf/{pdf_id}.pdf"
@@ -165,7 +166,6 @@ def run_test(doc_id=""):
             print(f"Ingestor text length: {len(ingestor_text)}")
 
             # Save debug output
-            debug_file = debug_dir / f"{pdf_id}_comparison.txt"
             with open(debug_file, "w", encoding="utf-8") as f:
                 f.write("=== BASELINE TEXT ===\n")
                 f.write(baseline_text)
@@ -177,7 +177,6 @@ def run_test(doc_id=""):
 
             # Compare results
             comparison = compare_text_content(baseline_text, ingestor_text, page_lookup)
-            results.append((pdf_id, comparison))
 
             # Log detailed results
             print(f"Results for {pdf_id}:")
@@ -211,13 +210,15 @@ def run_test(doc_id=""):
                         print(msg)
                         f.write(f"{msg}\n")
 
-            # Assert that the coverage is over 93%
-            assert (
-                comparison["coverage"] > TEST_COVERAGE_RATIO
-            ), f"Text coverage for {pdf_id} is below {TEST_COVERAGE_RATIO*100}%: {comparison['coverage']*100:.2f}%"
+            if comparison["coverage"] <= TEST_COVERAGE_RATIO:
+                raise ValueError(
+                    f"Text coverage for {pdf_id} must exceed {TEST_COVERAGE_RATIO:.0%}: "
+                    f"{comparison['coverage']:.2%}"
+                )
+            results.append((pdf_id, comparison))
 
         except Exception as e:
-            print(f"Error processing {pdf_id}: {str(e)}", exc_info=True)
+            logger.exception("Error processing %s", pdf_id)
             results.append((pdf_id, {"error": str(e)}))
 
             # Log error to debug file
@@ -227,15 +228,13 @@ def run_test(doc_id=""):
 
     return results
 
-    return results
 
-
-if __name__ == "__main__":
+def main(argv=None):
     parser = argparse.ArgumentParser(description="Test PDF text extraction")
     parser.add_argument(
         "--doc_id", help="Specific document ID to process", nargs="+", default=""
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     doc_id = "_".join(args.doc_id) if args.doc_id else ""
 
@@ -254,3 +253,12 @@ if __name__ == "__main__":
             print(
                 f"Words found: {result['words_found']} of {result['total_baseline_words']}"
             )
+
+    if not results:
+        logger.error("No PDF fixtures found")
+        return 1
+    return int(any("error" in result for _, result in results))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

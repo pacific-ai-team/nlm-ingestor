@@ -121,3 +121,15 @@ Some ideas for future work:
 3. After image build, you need to go to the pacific-server repo and deploy the modal app. Make sure you have the Pacific prod aws vars as env vars in your local environment.
 
 If you need to update nlm-utils, go to the nlm-utils repo, update the dependencies, build a whl, and copy under `whl/` in this repo.
+## CI timing and recovery
+
+Regular pytest files use two measured-duration shards and one immutable history
+plan shared by the entire workflow run. Completed files can be restored when
+rerunning failed jobs in that same run. The standalone Tika page suite keeps
+its existing service startup, readiness checks and command on the first worker;
+it runs again on a retry. The final build check requires both workers.
+
+`CI_RUNTIME_SHARDS` and the shard matrix must be changed together. Python 3.10
+and the original Java/Tika topology remain in use. The generated `ci_runtime/`
+package is owned and linted in Pacific Deploy. Local adapter tests do not prove
+GitHub artifact permissions or a reduction in workflow wall time.
